@@ -185,6 +185,29 @@ func (h *APIKeyHandler) Create(c *gin.Context) {
 		response.Unauthorized(c, "User not authenticated")
 		return
 	}
+	h.createForOwner(c, subject.UserID, "user.api_keys.create")
+}
+
+// CreateForUser is registered only under the authenticated administrator routes.
+// It preserves the target user's group access, key limits and billing ownership.
+func (h *APIKeyHandler) CreateForUser(c *gin.Context) {
+	if _, ok := middleware2.GetAuthSubjectFromContext(c); !ok {
+		response.Unauthorized(c, "Administrator authentication required")
+		return
+	}
+	if c.GetString(string(middleware2.ContextKeyUserRole)) != service.RoleAdmin {
+		response.Forbidden(c, "Administrator access required")
+		return
+	}
+	userID, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil || userID <= 0 {
+		response.BadRequest(c, "Invalid user ID")
+		return
+	}
+	h.createForOwner(c, userID, "admin.user_api_keys.create")
+}
+
+func (h *APIKeyHandler) createForOwner(c *gin.Context, userID int64, scope string) {
 
 	var req CreateAPIKeyRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -193,6 +216,11 @@ func (h *APIKeyHandler) Create(c *gin.Context) {
 	}
 	if err := validateAPIKeyCreateRequest(req); err != nil {
 		response.BadRequest(c, "Invalid request: numeric limits must be finite and non-negative, and expires_in_days must be greater than zero")
+		return
+	}
+	req.Name = strings.TrimSpace(req.Name)
+	if req.Name == "" || len([]rune(req.Name)) > 100 || (req.GroupID != nil && *req.GroupID <= 0) {
+		response.BadRequest(c, "Name must contain 1-100 characters and group_id must be positive")
 		return
 	}
 
@@ -217,8 +245,13 @@ func (h *APIKeyHandler) Create(c *gin.Context) {
 		svcReq.RateLimit7d = *req.RateLimit7d
 	}
 
-	executeUserIdempotentJSON(c, "user.api_keys.create", req, service.DefaultWriteIdempotencyTTL(), func(ctx context.Context) (any, error) {
-		key, err := h.apiKeyService.Create(ctx, subject.UserID, svcReq)
+	// Include the owner because the route template is identical for every user.
+	payload := struct {
+		UserID  int64               `json:"user_id"`
+		Request CreateAPIKeyRequest `json:"request"`
+	}{userID, req}
+	executeUserIdempotentJSON(c, scope, payload, service.DefaultWriteIdempotencyTTL(), func(ctx context.Context) (any, error) {
+		key, err := h.apiKeyService.Create(ctx, userID, svcReq)
 		if err != nil {
 			return nil, err
 		}

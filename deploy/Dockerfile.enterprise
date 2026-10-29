@@ -1,0 +1,6 @@
+FROM weishaw/sub2api:0.2.19@sha256:969e5c0fddc13f52be2772ea86e8e03ee2261f80ff08495916ffff68292c8380
+ARG COMMIT
+LABEL org.opencontainers.image.source="https://github.com/gotisama/sub2api"
+LABEL org.opencontainers.image.version="0.2.19-milejoy.1"
+LABEL org.opencontainers.image.revision="${COMMIT}"
+COPY --chown=sub2api:sub2api --chmod=755 sub2api /app/sub2api

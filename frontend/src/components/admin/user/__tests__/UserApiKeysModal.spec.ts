@@ -3,15 +3,16 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import UserApiKeysModal from '../UserApiKeysModal.vue'
 import type { AdminUser } from '@/types'
 
-const { getKeys } = vi.hoisted(() => ({ getKeys: vi.fn() }))
+const { getKeys, createKey, getGroups } = vi.hoisted(() => ({ getKeys: vi.fn(), createKey: vi.fn(), getGroups: vi.fn() }))
 vi.mock('@/api/admin', () => ({ adminAPI: {
-  users: { getUserApiKeys: getKeys }, groups: { getAll: vi.fn().mockResolvedValue([]) },
+  users: { getUserApiKeys: getKeys }, groups: { getAll: getGroups },
+  apiKeys: { createUserApiKey: createKey },
 } }))
 vi.mock('@/stores/app', () => ({ useAppStore: () => ({ showError: vi.fn(), showSuccess: vi.fn() }) }))
 vi.mock('@/utils/format', () => ({ formatDateTime: (value: string) => value }))
 vi.mock('vue-i18n', () => ({ useI18n: () => ({ t: (key: string) => key }) }))
 enableAutoUnmount(afterEach)
-beforeEach(() => { getKeys.mockReset(); vi.spyOn(console, 'error').mockImplementation(() => {}) })
+beforeEach(() => { getKeys.mockReset(); createKey.mockReset(); getGroups.mockResolvedValue([{ id: 7, name: 'Official GPT', status: 'active' }]); vi.spyOn(console, 'error').mockImplementation(() => {}) })
 afterEach(() => vi.restoreAllMocks())
 function deferred() {
   let resolve!: (value: unknown) => void
@@ -38,6 +39,42 @@ async function switchUser(wrapper: Awaited<ReturnType<typeof open>>) {
 }
 
 describe('user API key loading', () => {
+  async function fillCreate(wrapper: Awaited<ReturnType<typeof open>>) {
+    await wrapper.get('[data-testid="open-create-key"]').trigger('click')
+    await wrapper.get('[data-testid="key-name"]').setValue('Team client')
+    await wrapper.get('[data-testid="key-group"]').setValue('7')
+    await wrapper.get('[data-testid="key-quota"]').setValue('12')
+  }
+
+  it('creates a key for the selected user with limits and prevents double submission', async () => {
+    getKeys.mockResolvedValue({ items: [] })
+    const pending = deferred(); createKey.mockReturnValue(pending.promise)
+    const wrapper = await open(); await flushPromises(); await fillCreate(wrapper)
+    await wrapper.get('form').trigger('submit'); await wrapper.get('form').trigger('submit')
+    expect(createKey).toHaveBeenCalledTimes(1)
+    expect(createKey).toHaveBeenCalledWith(1, { name: 'Team client', group_id: 7, quota: 12, rate_limit_1d: 0 }, expect.any(String))
+    pending.resolve({ key: 'sk-issued-to-user-one' }); await flushPromises()
+    expect(wrapper.get('[data-testid="created-key"] input').element).toHaveProperty('value', 'sk-issued-to-user-one')
+    await switchUser(wrapper); await flushPromises()
+    expect(wrapper.find('[data-testid="created-key"]').exists()).toBe(false)
+  })
+
+  it('reuses the idempotency key after an uncertain failure', async () => {
+    getKeys.mockResolvedValue({ items: [] }); createKey.mockRejectedValue(new Error('timeout'))
+    const wrapper = await open(); await flushPromises(); await fillCreate(wrapper)
+    await wrapper.get('form').trigger('submit'); await flushPromises()
+    await wrapper.get('form').trigger('submit'); await flushPromises()
+    expect(createKey).toHaveBeenCalledTimes(2)
+    expect(createKey.mock.calls[0][2]).toBe(createKey.mock.calls[1][2])
+  })
+
+  it('does not reveal a late issued key after switching users', async () => {
+    getKeys.mockResolvedValue({ items: [] }); const pending = deferred(); createKey.mockReturnValue(pending.promise)
+    const wrapper = await open(); await flushPromises(); await fillCreate(wrapper)
+    await wrapper.get('form').trigger('submit'); await switchUser(wrapper)
+    pending.resolve({ key: 'sk-previous-user-secret' }); await flushPromises()
+    expect(wrapper.find('[data-testid="created-key"]').exists()).toBe(false)
+  })
   it('does not display the previous user keys when the next load fails', async () => {
     getKeys.mockResolvedValueOnce(keys(1, 'first-user-key')).mockRejectedValueOnce(new Error('unavailable'))
     const wrapper = await open(); await flushPromises()

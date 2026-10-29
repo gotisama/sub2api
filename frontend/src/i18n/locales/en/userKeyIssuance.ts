@@ -1,0 +1,17 @@
+export default {
+  create: 'Create key for this user',
+  creating: 'Creating…',
+  hint: 'The key belongs to this user and shares their balance, concurrency and RPM limits. The user must have group access and an active subscription for subscription groups.',
+  name: 'Key name',
+  selectGroup: 'Select a group',
+  quota: 'Total spending limit (USD)',
+  dailyLimit: '24-hour spending limit (USD)',
+  expiry: 'Validity in days',
+  noExpiry: 'Leave empty for no expiry',
+  limitsHint: '0 adds no spending limit. User balance and group rules still apply.',
+  created: 'Key created for this user. Copy and deliver it securely. Closing this dialog hides the full key.',
+  copy: 'Copy key',
+  copied: 'Key copied',
+  copyFailed: 'Copy failed. Please copy the key manually.',
+  failed: 'Creation failed. Check user group access and retry.'
+}

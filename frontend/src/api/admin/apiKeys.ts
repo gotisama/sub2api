@@ -4,7 +4,14 @@
  */
 
 import { apiClient } from '../client'
-import type { ApiKey } from '@/types'
+import type { ApiKey, CreateApiKeyRequest } from '@/types'
+
+export async function createUserApiKey(userId: number, payload: CreateApiKeyRequest, idempotencyKey: string): Promise<ApiKey> {
+  const { data } = await apiClient.post<ApiKey>(`/admin/users/${userId}/api-keys`, payload, {
+    headers: { 'Idempotency-Key': idempotencyKey }
+  })
+  return data
+}
 
 export interface UpdateApiKeyGroupResult {
   api_key: ApiKey
@@ -27,6 +34,7 @@ export async function updateApiKeyGroup(id: number, groupId: number | null): Pro
 }
 
 export const apiKeysAPI = {
+  createUserApiKey,
   updateApiKeyGroup
 }
 

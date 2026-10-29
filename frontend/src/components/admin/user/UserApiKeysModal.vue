@@ -7,6 +7,31 @@
         </div>
         <div><p class="font-medium text-gray-900 dark:text-white">{{ user.email }}</p><p class="text-sm text-gray-500 dark:text-dark-400">{{ user.username }}</p></div>
       </div>
+      <div class="flex justify-end">
+        <button class="btn btn-primary" data-testid="open-create-key" :disabled="creating" @click="showCreate = !showCreate">{{ t('userKeyIssuance.create') }}</button>
+      </div>
+      <form v-if="showCreate" class="space-y-3 rounded-xl border border-gray-200 p-4 dark:border-dark-600" data-testid="create-key-form" @submit.prevent="createKey">
+        <p class="text-sm text-gray-500">{{ t('userKeyIssuance.hint') }}</p>
+        <label class="block"><span class="input-label">{{ t('userKeyIssuance.name') }}</span><input v-model="createForm.name" data-testid="key-name" class="input" required maxlength="100" :disabled="creating" /></label>
+        <label class="block"><span class="input-label">{{ t('admin.users.group') }}</span>
+          <select v-model="createForm.groupId" data-testid="key-group" class="input" required :disabled="creating">
+            <option value="" disabled>{{ t('userKeyIssuance.selectGroup') }}</option>
+            <option v-for="group in allGroups.filter(g => g.status === 'active')" :key="group.id" :value="group.id">{{ group.name }}</option>
+          </select>
+        </label>
+        <div class="grid grid-cols-1 gap-3 sm:grid-cols-3">
+          <label><span class="input-label">{{ t('userKeyIssuance.quota') }}</span><input v-model.number="createForm.quota" data-testid="key-quota" class="input" type="number" min="0" step="0.01" :disabled="creating" /></label>
+          <label><span class="input-label">{{ t('userKeyIssuance.dailyLimit') }}</span><input v-model.number="createForm.dailyLimit" class="input" type="number" min="0" step="0.01" :disabled="creating" /></label>
+          <label><span class="input-label">{{ t('userKeyIssuance.expiry') }}</span><input v-model="createForm.days" class="input" type="number" min="1" max="36500" step="1" :disabled="creating" :placeholder="t('userKeyIssuance.noExpiry')" /></label>
+        </div>
+        <p class="text-xs text-gray-500">{{ t('userKeyIssuance.limitsHint') }}</p>
+        <button type="submit" class="btn btn-primary" :disabled="creating || !createForm.name.trim() || !createForm.groupId">{{ t(creating ? 'userKeyIssuance.creating' : 'userKeyIssuance.create') }}</button>
+      </form>
+      <div v-if="createdKey" class="space-y-2 rounded-xl bg-green-50 p-4 dark:bg-green-900/20" data-testid="created-key">
+        <p class="text-sm">{{ t('userKeyIssuance.created') }}</p>
+        <input :value="createdKey" readonly class="input font-mono" aria-label="API Key" />
+        <button class="btn btn-primary" @click="copyCreatedKey">{{ t('userKeyIssuance.copy') }}</button>
+      </div>
       <div v-if="loading" class="flex justify-center py-8"><svg class="h-8 w-8 animate-spin text-primary-500" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg></div>
       <div v-else-if="apiKeys.length === 0" class="py-8 text-center"><p class="text-sm text-gray-500">{{ t('admin.users.noApiKeys') }}</p></div>
       <div v-else ref="scrollContainerRef" class="max-h-96 space-y-3 overflow-y-auto" @scroll="closeGroupSelector">
@@ -106,7 +131,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, watch, onMounted, onUnmounted, type ComponentPublicInstance } from 'vue'
+import { ref, reactive, computed, watch, onMounted, onUnmounted, type ComponentPublicInstance } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useAppStore } from '@/stores/app'
 import { adminAPI } from '@/api/admin'
@@ -124,6 +149,11 @@ const appStore = useAppStore()
 const apiKeys = ref<ApiKey[]>([])
 const allGroups = ref<AdminGroup[]>([])
 const loading = ref(false)
+const showCreate = ref(false)
+const creating = ref(false)
+const createdKey = ref('')
+const createForm = reactive({ name: '', groupId: '' as number | string, quota: 0, dailyLimit: 0, days: '' })
+let pendingCreation: { signature: string; key: string } | null = null
 let requestVersion = 0
 const updatingKeyIds = ref(new Set<number>())
 const groupSelectorKeyId = ref<number | null>(null)
@@ -148,6 +178,10 @@ const setGroupButtonRef = (keyId: number, el: Element | ComponentPublicInstance 
 watch(() => [props.show, props.user?.id] as const, ([show], _, onCleanup) => {
   onCleanup(() => { requestVersion++ })
   closeGroupSelector()
+  showCreate.value = false
+  createdKey.value = ''
+  pendingCreation = null
+  Object.assign(createForm, { name: '', groupId: '', quota: 0, dailyLimit: 0, days: '' })
   if (show && props.user) {
     load()
     loadGroups()
@@ -177,6 +211,41 @@ const loadGroups = async () => {
     allGroups.value = groups
   } catch (error) {
     console.error('Failed to load groups:', error)
+  }
+}
+
+const createKey = async () => {
+  if (!props.user || creating.value || !createForm.name.trim() || !createForm.groupId) return
+  const userId = props.user.id
+  const payload = {
+    name: createForm.name.trim(), group_id: Number(createForm.groupId),
+    quota: Number(createForm.quota), rate_limit_1d: Number(createForm.dailyLimit),
+    ...(createForm.days ? { expires_in_days: Number(createForm.days) } : {})
+  }
+  const signature = JSON.stringify({ userId, payload })
+  if (pendingCreation?.signature !== signature) pendingCreation = { signature, key: crypto.randomUUID() }
+  creating.value = true
+  createdKey.value = ''
+  try {
+    const key = await adminAPI.apiKeys.createUserApiKey(userId, payload, pendingCreation.key)
+    if (!props.show || props.user?.id !== userId) return
+    createdKey.value = key.key
+    showCreate.value = false
+    pendingCreation = null
+    await load()
+  } catch (error: any) {
+    if (props.show && props.user?.id === userId) appStore.showError(error?.message || t('userKeyIssuance.failed'))
+  } finally {
+    creating.value = false
+  }
+}
+
+const copyCreatedKey = async () => {
+  try {
+    await navigator.clipboard.writeText(createdKey.value)
+    appStore.showSuccess(t('userKeyIssuance.copied'))
+  } catch {
+    appStore.showError(t('userKeyIssuance.copyFailed'))
   }
 }
 
@@ -249,6 +318,8 @@ const handleClickOutside = (event: MouseEvent) => {
 }
 
 const handleClose = () => {
+  if (creating.value) return
+  createdKey.value = ''
   closeGroupSelector()
   emit('close')
 }
