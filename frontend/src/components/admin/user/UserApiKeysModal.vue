@@ -27,10 +27,11 @@
         <p class="text-xs text-gray-500">{{ t('userKeyIssuance.limitsHint') }}</p>
         <button type="submit" class="btn btn-primary" :disabled="creating || !createForm.name.trim() || !createForm.groupId">{{ t(creating ? 'userKeyIssuance.creating' : 'userKeyIssuance.create') }}</button>
       </form>
-      <div v-if="createdKey" class="space-y-2 rounded-xl bg-green-50 p-4 dark:bg-green-900/20" data-testid="created-key">
+      <p v-if="creationError" role="alert" class="rounded-xl bg-red-50 p-3 text-red-700" data-testid="creation-error">{{ creationError }}</p>
+      <div v-if="createdKey" ref="createdKeyPanel" role="status" aria-live="polite" class="space-y-2 rounded-xl bg-green-50 p-4 dark:bg-green-900/20" data-testid="created-key">
         <p class="text-sm">{{ t('userKeyIssuance.created') }}</p>
         <input :value="createdKey" readonly class="input font-mono" aria-label="API Key" />
-        <button class="btn btn-primary" @click="copyCreatedKey">{{ t('userKeyIssuance.copy') }}</button>
+        <button class="btn btn-primary" @click="copyKey(createdKey)">{{ t('userKeyIssuance.copy') }}</button>
       </div>
       <div v-if="loading" class="flex justify-center py-8"><svg class="h-8 w-8 animate-spin text-primary-500" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg></div>
       <div v-else-if="apiKeys.length === 0" class="py-8 text-center"><p class="text-sm text-gray-500">{{ t('admin.users.noApiKeys') }}</p></div>
@@ -39,7 +40,11 @@
           <div class="flex items-start justify-between">
             <div class="min-w-0 flex-1">
               <div class="mb-1 flex items-center gap-2"><span class="font-medium text-gray-900 dark:text-white">{{ key.name }}</span><span :class="['badge text-xs', key.status === 'active' ? 'badge-success' : 'badge-danger']">{{ key.status }}</span></div>
-              <p class="truncate font-mono text-sm text-gray-500">{{ key.key.substring(0, 20) }}...{{ key.key.substring(key.key.length - 8) }}</p>
+              <div class="mt-2 flex flex-wrap items-center gap-2">
+                <input :type="visibleKeyIds.has(key.id) ? 'text' : 'password'" :value="key.key" readonly class="input min-w-0 flex-1 font-mono" :aria-label="t('userKeyIssuance.name')" :data-testid="`stored-key-${key.id}`" @click="($event.target as HTMLInputElement).select()" />
+                <button type="button" class="btn btn-secondary" :data-testid="`reveal-key-${key.id}`" :aria-pressed="visibleKeyIds.has(key.id)" @click="toggleKey(key.id)">{{ t(visibleKeyIds.has(key.id) ? 'userKeyIssuance.hide' : 'userKeyIssuance.show') }}</button>
+                <button type="button" class="btn btn-primary" :data-testid="`copy-key-${key.id}`" @click="copyKey(key.key, key.id)">{{ t('userKeyIssuance.copy') }}</button>
+              </div>
             </div>
           </div>
           <div class="mt-3 flex flex-wrap gap-4 text-xs text-gray-500">
@@ -131,7 +136,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, computed, watch, onMounted, onUnmounted, type ComponentPublicInstance } from 'vue'
+import { ref, reactive, computed, watch, nextTick, onMounted, onUnmounted, type ComponentPublicInstance } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useAppStore } from '@/stores/app'
 import { adminAPI } from '@/api/admin'
@@ -152,6 +157,9 @@ const loading = ref(false)
 const showCreate = ref(false)
 const creating = ref(false)
 const createdKey = ref('')
+const createdKeyPanel = ref<HTMLElement | null>(null)
+const creationError = ref('')
+const visibleKeyIds = ref(new Set<number>())
 const createForm = reactive({ name: '', groupId: '' as number | string, quota: 0, dailyLimit: 0, days: '' })
 let pendingCreation: { signature: string; key: string } | null = null
 let requestVersion = 0
@@ -180,6 +188,8 @@ watch(() => [props.show, props.user?.id] as const, ([show], _, onCleanup) => {
   closeGroupSelector()
   showCreate.value = false
   createdKey.value = ''
+  visibleKeyIds.value.clear()
+  creationError.value = ''
   pendingCreation = null
   Object.assign(createForm, { name: '', groupId: '', quota: 0, dailyLimit: 0, days: '' })
   if (show && props.user) {
@@ -223,28 +233,60 @@ const createKey = async () => {
     ...(createForm.days ? { expires_in_days: Number(createForm.days) } : {})
   }
   const signature = JSON.stringify({ userId, payload })
-  if (pendingCreation?.signature !== signature) pendingCreation = { signature, key: crypto.randomUUID() }
   creating.value = true
   createdKey.value = ''
+  creationError.value = ''
   try {
+    if (pendingCreation?.signature !== signature) pendingCreation = { signature, key: crypto.randomUUID() }
     const key = await adminAPI.apiKeys.createUserApiKey(userId, payload, pendingCreation.key)
     if (!props.show || props.user?.id !== userId) return
+    if (!key?.key) throw new Error(t('userKeyIssuance.missingKey'))
     createdKey.value = key.key
     showCreate.value = false
     pendingCreation = null
+    appStore.showSuccess(t('userKeyIssuance.created'))
+    await nextTick()
+    createdKeyPanel.value?.scrollIntoView?.({ block: 'nearest', behavior: 'smooth' })
     await load()
   } catch (error: any) {
-    if (props.show && props.user?.id === userId) appStore.showError(error?.message || t('userKeyIssuance.failed'))
+    if (props.show && props.user?.id === userId) {
+      creationError.value = error?.message || t('userKeyIssuance.failed')
+      appStore.showError(creationError.value)
+    }
   } finally {
     creating.value = false
   }
 }
 
-const copyCreatedKey = async () => {
+const toggleKey = (id: number) => {
+  if (visibleKeyIds.value.has(id)) visibleKeyIds.value.delete(id)
+  else visibleKeyIds.value.add(id)
+}
+
+const copyKey = async (value: string, id?: number) => {
   try {
-    await navigator.clipboard.writeText(createdKey.value)
+    if (!value) throw new Error('Empty key')
+    try {
+      if (!navigator.clipboard?.writeText) throw new Error('Clipboard unavailable')
+      await navigator.clipboard.writeText(value)
+    } catch {
+      const previousFocus = document.activeElement as HTMLElement | null
+      const field = document.createElement('textarea')
+      field.value = value
+      field.style.cssText = 'position:fixed;opacity:0;pointer-events:none;'
+      ;(previousFocus?.parentElement || document.body).appendChild(field)
+      try {
+        field.focus()
+        field.select()
+        if (!document.execCommand('copy')) throw new Error('Copy rejected')
+      } finally {
+        field.remove()
+        previousFocus?.focus()
+      }
+    }
     appStore.showSuccess(t('userKeyIssuance.copied'))
   } catch {
+    if (id !== undefined) visibleKeyIds.value.add(id)
     appStore.showError(t('userKeyIssuance.copyFailed'))
   }
 }
@@ -320,6 +362,7 @@ const handleClickOutside = (event: MouseEvent) => {
 const handleClose = () => {
   if (creating.value) return
   createdKey.value = ''
+  visibleKeyIds.value.clear()
   closeGroupSelector()
   emit('close')
 }

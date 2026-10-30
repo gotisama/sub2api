@@ -11,6 +11,9 @@ export default {
   limitsHint: '0 adds no spending limit. User balance and group rules still apply.',
   created: 'Key created for this user. Copy and deliver it securely. Closing this dialog hides the full key.',
   copy: 'Copy key',
+  show: 'Show',
+  hide: 'Hide',
+  missingKey: 'No key was returned. Reopen the user key list to check the result before creating another key.',
   copied: 'Key copied',
   copyFailed: 'Copy failed. Please copy the key manually.',
   failed: 'Creation failed. Check user group access and retry.'

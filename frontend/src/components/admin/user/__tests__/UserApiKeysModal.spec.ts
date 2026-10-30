@@ -3,12 +3,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import UserApiKeysModal from '../UserApiKeysModal.vue'
 import type { AdminUser } from '@/types'
 
-const { getKeys, createKey, getGroups } = vi.hoisted(() => ({ getKeys: vi.fn(), createKey: vi.fn(), getGroups: vi.fn() }))
+const { getKeys, createKey, getGroups, showSuccess } = vi.hoisted(() => ({ getKeys: vi.fn(), createKey: vi.fn(), getGroups: vi.fn(), showSuccess: vi.fn() }))
 vi.mock('@/api/admin', () => ({ adminAPI: {
   users: { getUserApiKeys: getKeys }, groups: { getAll: getGroups },
   apiKeys: { createUserApiKey: createKey },
 } }))
-vi.mock('@/stores/app', () => ({ useAppStore: () => ({ showError: vi.fn(), showSuccess: vi.fn() }) }))
+vi.mock('@/stores/app', () => ({ useAppStore: () => ({ showError: vi.fn(), showSuccess }) }))
 vi.mock('@/utils/format', () => ({ formatDateTime: (value: string) => value }))
 vi.mock('vue-i18n', () => ({ useI18n: () => ({ t: (key: string) => key }) }))
 enableAutoUnmount(afterEach)
@@ -39,6 +39,34 @@ async function switchUser(wrapper: Awaited<ReturnType<typeof open>>) {
 }
 
 describe('user API key loading', () => {
+  it('reveals and copies an existing key after reopening, then resets visibility', async () => {
+    getKeys.mockResolvedValue(keys(1, 'existing-key'))
+    const writeText = vi.fn().mockResolvedValue(undefined)
+    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } })
+    const wrapper = await open(); await flushPromises()
+    expect(wrapper.get('[data-testid="stored-key-1"]').attributes('type')).toBe('password')
+    await wrapper.get('[data-testid="reveal-key-1"]').trigger('click')
+    expect(wrapper.get('[data-testid="stored-key-1"]').attributes('type')).toBe('text')
+    await wrapper.get('[data-testid="copy-key-1"]').trigger('click'); await flushPromises()
+    expect(writeText).toHaveBeenCalledWith('sk-example-key-value-for-tests')
+    await wrapper.setProps({ show: false }); await wrapper.setProps({ show: true }); await flushPromises()
+    expect(wrapper.get('[data-testid="stored-key-1"]').attributes('type')).toBe('password')
+  })
+
+  it('falls back when clipboard permission is denied and reveals for manual copy if both fail', async () => {
+    getKeys.mockResolvedValue(keys(1, 'existing-key'))
+    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText: vi.fn().mockRejectedValue(new Error('denied')) } })
+    const fallback = vi.fn().mockReturnValueOnce(true).mockReturnValueOnce(false)
+    Object.defineProperty(document, 'execCommand', { configurable: true, value: fallback })
+    const wrapper = await open(); await flushPromises()
+    await wrapper.get('[data-testid="copy-key-1"]').trigger('click'); await flushPromises()
+    expect(fallback).toHaveBeenCalledWith('copy')
+    expect(document.querySelector('textarea')).toBeNull()
+    await wrapper.get('[data-testid="copy-key-1"]').trigger('click'); await flushPromises()
+    expect(wrapper.get('[data-testid="stored-key-1"]').attributes('type')).toBe('text')
+    expect(wrapper.get('[data-testid="stored-key-1"]').element).toHaveProperty('value', 'sk-example-key-value-for-tests')
+  })
+
   async function fillCreate(wrapper: Awaited<ReturnType<typeof open>>) {
     await wrapper.get('[data-testid="open-create-key"]').trigger('click')
     await wrapper.get('[data-testid="key-name"]').setValue('Team client')
@@ -54,6 +82,7 @@ describe('user API key loading', () => {
     expect(createKey).toHaveBeenCalledTimes(1)
     expect(createKey).toHaveBeenCalledWith(1, { name: 'Team client', group_id: 7, quota: 12, rate_limit_1d: 0 }, expect.any(String))
     pending.resolve({ key: 'sk-issued-to-user-one' }); await flushPromises()
+    expect(showSuccess).toHaveBeenCalledWith('userKeyIssuance.created')
     expect(wrapper.get('[data-testid="created-key"] input').element).toHaveProperty('value', 'sk-issued-to-user-one')
     await switchUser(wrapper); await flushPromises()
     expect(wrapper.find('[data-testid="created-key"]').exists()).toBe(false)
@@ -66,6 +95,15 @@ describe('user API key loading', () => {
     await wrapper.get('form').trigger('submit'); await flushPromises()
     expect(createKey).toHaveBeenCalledTimes(2)
     expect(createKey.mock.calls[0][2]).toBe(createKey.mock.calls[1][2])
+  })
+
+  it('shows a persistent error instead of silently hiding a missing creation result', async () => {
+    getKeys.mockResolvedValue({ items: [] }); createKey.mockResolvedValue({ id: 1 })
+    const wrapper = await open(); await flushPromises(); await fillCreate(wrapper)
+    await wrapper.get('form').trigger('submit'); await flushPromises()
+    expect(wrapper.get('[data-testid="creation-error"]').text()).toBe('userKeyIssuance.missingKey')
+    expect(wrapper.find('[data-testid="created-key"]').exists()).toBe(false)
+    expect(wrapper.find('form').exists()).toBe(true)
   })
 
   it('does not reveal a late issued key after switching users', async () => {
